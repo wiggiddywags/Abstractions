@@ -34,6 +34,10 @@ const SHAPE_META = {
   parabolic: {
     name: 'GOING PARABOLIC',
     formula: 'y = u³, r = u² (Exponential Flare)'
+  },
+  lightspeed: {
+    name: 'LIGHTSPEED',
+    formula: 'Warp Tunnel: r = 0.5 + 3.5|u|⁴ + streaks'
   }
 };
 
@@ -83,46 +87,53 @@ const ParametricShape = ({
   isPlaying, 
   speed, 
   lineColor,
-  shapeId
+  shapeId,
+  useLighting
 }: { 
   isPlaying: boolean; 
   speed: number; 
   lineColor: string;
   shapeId: string;
+  useLighting: boolean;
 }) => {
-  const meshRef = useRef<THREE.LineSegments>(null);
-  const geometryRef = useRef<THREE.BufferGeometry>(null);
+  const groupRef = useRef<THREE.Group>(null);
+  const lineGeoRef = useRef<THREE.BufferGeometry>(null);
+  const surfaceGeoRef = useRef<THREE.BufferGeometry>(null);
   const customTime = useRef(0);
 
-  const uSteps = 200;
-  const vSteps = 200;
+  // Reduced slightly to maintain 60fps when computing normals every frame
+  const uSteps = 150;
+  const vSteps = 150;
 
-  const { indices, initialPositions } = useMemo(() => {
+  const { lineIndices, triIndices, sharedPositions } = useMemo(() => {
     const positions = new Float32Array((uSteps + 1) * (vSteps + 1) * 3);
-    const indices = [];
+    const lIndices = [];
+    const tIndices = [];
 
     for (let i = 0; i < uSteps; i++) {
       for (let j = 0; j < vSteps; j++) {
         const a = i * (vSteps + 1) + j;
         const b = a + 1;
         const c = (i + 1) * (vSteps + 1) + j;
-        indices.push(a, b);
-        indices.push(a, c);
+        const d = c + 1;
+        
+        lIndices.push(a, b);
+        lIndices.push(a, c);
+        
+        tIndices.push(a, c, b);
+        tIndices.push(b, c, d);
       }
     }
 
-    return { indices, initialPositions: positions };
+    return { lineIndices: lIndices, triIndices: tIndices, sharedPositions: positions };
   }, [uSteps, vSteps]);
 
   useFrame((state, delta) => {
-    if (!geometryRef.current) return;
-
     if (isPlaying) {
       customTime.current += delta * speed;
     }
     
     const time = customTime.current;
-    const positions = geometryRef.current.attributes.position.array as Float32Array;
     let idx = 0;
 
     for (let i = 0; i <= uSteps; i++) {
@@ -179,46 +190,101 @@ const ParametricShape = ({
           x = rMod * Math.cos(V + twist);
           y = height;
           z = rMod * Math.sin(V + twist);
+        } else if (shapeId === 'lightspeed') {
+          const U = (u / Math.PI) * 2 - 1; // -1 to 1
+          const V = v;                     // 0 to 2PI
+          
+          // Flare out at the ends like a wormhole
+          const radius = 0.5 + 3.5 * Math.pow(Math.abs(U), 4);
+          
+          // Hyper-fast forward ripples
+          const ripple = 0.1 * Math.sin(30 * U - time * 35);
+          
+          // "Light streaks" wrapping around the tunnel
+          const streaks = 1.0 + 0.15 * Math.sin(16 * V + time * 15);
+          
+          const rFinal = (radius + ripple * (1.0 + Math.abs(U) * 2.0)) * streaks;
+          
+          // Dynamic vortex twist
+          const twist = V + U * 2.5 * Math.cos(time * 1.5) - time * 4.0;
+          
+          x = rFinal * Math.cos(twist);
+          y = rFinal * Math.sin(twist);
+          z = U * 6.0;
         }
 
-        positions[idx++] = x;
-        positions[idx++] = y;
-        positions[idx++] = z;
+        sharedPositions[idx++] = x;
+        sharedPositions[idx++] = y;
+        sharedPositions[idx++] = z;
       }
     }
 
-    geometryRef.current.attributes.position.needsUpdate = true;
+    if (lineGeoRef.current) {
+      lineGeoRef.current.attributes.position.needsUpdate = true;
+    }
+    
+    if (surfaceGeoRef.current && useLighting) {
+      surfaceGeoRef.current.attributes.position.needsUpdate = true;
+      surfaceGeoRef.current.computeVertexNormals();
+    }
 
-    if (meshRef.current && isPlaying) {
-      meshRef.current.rotation.y += delta * 0.15 * speed;
-      meshRef.current.rotation.x += delta * 0.1 * speed;
+    if (groupRef.current && isPlaying) {
+      groupRef.current.rotation.y += delta * 0.15 * speed;
+      groupRef.current.rotation.x += delta * 0.1 * speed;
     }
   });
 
   return (
-    <lineSegments ref={meshRef}>
-      <bufferGeometry ref={geometryRef}>
-        <bufferAttribute
-          attach="attributes-position"
-          count={initialPositions.length / 3}
-          array={initialPositions}
-          itemSize={3}
+    <group ref={groupRef}>
+      <lineSegments>
+        <bufferGeometry ref={lineGeoRef}>
+          <bufferAttribute
+            attach="attributes-position"
+            count={sharedPositions.length / 3}
+            array={sharedPositions}
+            itemSize={3}
+          />
+          <bufferAttribute
+            attach="index"
+            count={lineIndices.length}
+            array={new Uint32Array(lineIndices)}
+            itemSize={1}
+          />
+        </bufferGeometry>
+        <lineBasicMaterial 
+          color={lineColor} 
+          transparent 
+          opacity={useLighting ? 0.05 : 0.15} 
+          linewidth={1} 
+          blending={THREE.NormalBlending}
         />
-        <bufferAttribute
-          attach="index"
-          count={indices.length}
-          array={new Uint32Array(indices)}
-          itemSize={1}
+      </lineSegments>
+      
+      <mesh visible={useLighting}>
+        <bufferGeometry ref={surfaceGeoRef}>
+          <bufferAttribute
+            attach="attributes-position"
+            count={sharedPositions.length / 3}
+            array={sharedPositions}
+            itemSize={3}
+          />
+          <bufferAttribute
+            attach="index"
+            count={triIndices.length}
+            array={new Uint32Array(triIndices)}
+            itemSize={1}
+          />
+        </bufferGeometry>
+        <meshStandardMaterial 
+          color={lineColor} 
+          side={THREE.DoubleSide} 
+          transparent 
+          opacity={0.8} 
+          roughness={0.3} 
+          metalness={0.2} 
         />
-      </bufferGeometry>
-      <lineBasicMaterial 
-        color={lineColor} 
-        transparent 
-        opacity={0.15} 
-        linewidth={1} 
-        blending={THREE.NormalBlending}
-      />
-    </lineSegments>
+      </mesh>
+    </group>
   );
 };
 
@@ -231,6 +297,7 @@ export default function App() {
   const [speed, setSpeed] = useState(1);
   const [lineColor, setLineColor] = useState('#4a4a4a');
   const [bgColor, setBgColor] = useState('#f8f9fa');
+  const [useLighting, setUseLighting] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   
   const captureRef = useRef<any>(null);
@@ -294,6 +361,7 @@ export default function App() {
                 <option value="knot">Quantum Knot</option>
                 <option value="mobius">Möbius Wave</option>
                 <option value="parabolic">Going Parabolic</option>
+                <option value="lightspeed">Lightspeed Warp</option>
               </select>
               <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-4 text-gray-500">
                 <ChevronDown size={16} />
@@ -356,6 +424,16 @@ export default function App() {
                   />
                 </div>
               </div>
+
+              <div className="flex items-center justify-between bg-gray-50 p-3 rounded-lg border border-gray-100">
+                <span className="text-sm font-medium text-gray-700">Enable Lighting</span>
+                <button 
+                  onClick={() => setUseLighting(!useLighting)}
+                  className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${useLighting ? 'bg-gray-900' : 'bg-gray-300'}`}
+                >
+                  <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${useLighting ? 'translate-x-5' : 'translate-x-1'}`} />
+                </button>
+              </div>
             </div>
           </div>
 
@@ -415,8 +493,15 @@ export default function App() {
           gl={{ preserveDrawingBuffer: true }}
         >
           <color attach="background" args={[bgColor]} />
+          {useLighting && (
+            <>
+              <ambientLight intensity={0.6} />
+              <directionalLight position={[10, 10, 5]} intensity={1.5} />
+              <directionalLight position={[-10, -10, -5]} intensity={0.8} color={lineColor} />
+            </>
+          )}
           <CaptureManager captureRef={captureRef} />
-          <ParametricShape isPlaying={isPlaying} speed={speed} lineColor={lineColor} shapeId={shapeId} />
+          <ParametricShape isPlaying={isPlaying} speed={speed} lineColor={lineColor} shapeId={shapeId} useLighting={useLighting} />
           <OrbitControls 
             enableZoom={true} 
             enablePan={false} 
